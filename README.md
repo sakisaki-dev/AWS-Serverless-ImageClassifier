@@ -1,4 +1,4 @@
-# Design Doc - HomeVision Take Home Assessment
+# Design Doc
 
 
 What follows is the design doc that shows the overall structure and hierarchy of my program, why I chose the components, what challenges I overcame and overall logistics of the program as a whole
