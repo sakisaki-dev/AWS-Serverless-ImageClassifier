@@ -1,0 +1,27 @@
+123 Main St, Los Angeles, CA 90001
+456 Oak Avenue, San Francisco, CA 94102
+1600 Amphitheatre Parkway, Mountain View, CA 94043
+350 5th Ave, New York, NY 10118
+1 Apple Park Way, Cupertino, CA 95014
+500 Terry A Francois Blvd, San Francisco, CA 94158
+221B Baker Street, London NW1 6XE, UK
+10 Downing Street, London SW1A 2AA, United Kingdom
+Champs-Élysées, 75008 Paris, France
+29 Rue de Rivoli, 75004 Paris, France
+Potsdamer Platz 1, 10785 Berlin, Germany
+Shibuya Crossing, Tokyo 150-0002, Japan
+1 Marina Bay Sands, Singapore 018956
+Sydney Opera House, Bennelong Point, Sydney NSW 2000, Australia
+Kremlin, Moscow 103073, Russia
+Plaza de Mayo, Buenos Aires C1064, Argentina
+1000 Rue Sherbrooke O, Montréal, QC H3A 1G5, Canada
+123 Fake Street, Springfield ZZ 99999
+No ZIP Code Address, Some City, California
+Invalid Address Without Proper Format
+CA 90210 Beverly Hills Missing Street Order
+742 Evergreen Terrace, Springfield, IL 62704
+1600 Pennsylvania Ave NW, Washington, DC 20500
+1600 Pennsylvania Ave NW Washington DC
+Eiffel Tower, Paris
+Colosseum, Rome, Italy
+1234 Random Blvd USA
