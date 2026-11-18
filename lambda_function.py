@@ -29,7 +29,8 @@ HOUSE_LABELS = {
 HOUSE_CONFIDENCE_THRESHOLD = 70.0
 
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff"}
+# Rekognition DetectLabels only accepts JPEG and PNG.
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 TEXT_EXTENSIONS  = {".txt", ".csv"}
 
 US_STATES = {
@@ -39,8 +40,10 @@ US_STATES = {
     "TX","UT","VT","VA","WA","WV","WI","WY","DC",
 }
 
-ZIP_CODE_RE   = re.compile(r"\b\d{5}(?:-\d{4})?\b")          
-STATE_ABBR_RE = re.compile(r"\b([A-Z]{2})\b")                 
+# Uppercase two-letter token that starts the line or follows a space/comma, and
+# is followed by a ZIP code or ends the line ("Springfield, IL 62704",
+# "Washington DC"). Matched case-sensitively so words like "de" or "in" don't count.
+STATE_ABBR_RE = re.compile(r"(?:^|[\s,])([A-Z]{2})(?=\s+\d{5}(?:-\d{4})?\b|\s*$)")
 US_COUNTRY_RE = re.compile(r"\b(USA|U\.S\.A\.?|United States)\b", re.IGNORECASE)
 
 NON_US_COUNTRIES_RE = re.compile(
@@ -154,16 +157,7 @@ def _is_us_address(address: str) -> bool:
     if has_us_country:
         return True
 
-    has_state = any(f" {s} " in f" {address_upper} " or address_upper.endswith(f" {s}") for s in US_STATES)
-    has_zip   = bool(ZIP_CODE_RE.search(address_upper))
-
-    if has_state and has_zip:
-        return True
-    
-    if has_state:
-        return True
-
-    return False
+    return any(m in US_STATES for m in STATE_ABBR_RE.findall(address))
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

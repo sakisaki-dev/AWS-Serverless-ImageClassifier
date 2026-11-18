@@ -2,7 +2,7 @@
 
 An event-driven pipeline on AWS. Files dropped into an S3 bucket trigger a Lambda function that:
 
-- **Images** (`.jpg`/`.jpeg`/`.png`): sends them to Amazon Rekognition and copies anything recognized as a house to `Houses/`.
+- **Images** (`.jpg`/`.jpeg`/`.png`, the formats Rekognition accepts): sends them to Amazon Rekognition and copies anything recognized as a house to `Houses/`.
 - **Address files** (`.txt`/`.csv`, one address per line): splits addresses into US and international lists and writes them to `Addresses/`.
 
 Everything is provisioned with Terraform, logged as structured JSON to CloudWatch, alarmed by email, and backed by an SQS dead-letter queue for failed invocations.
@@ -82,7 +82,7 @@ sequenceDiagram
 
 ### Image classification
 
-`_process_image` calls `DetectLabels` with `MaxLabels=20` and `MinConfidence=70` (`lambda_function.py:100-104`). If any returned label is in `HOUSE_LABELS` (`House`, `Housing`, `Home`, `Cottage`, `Villa`, `Building`, `Architecture`, `Neighborhood`, `Suburb`, `Residential Building`, `Single Family Residence`), the image is copied to `Houses/<filename>`. The original is never moved or deleted.
+`_process_image` calls `DetectLabels` with `MaxLabels=20` and `MinConfidence=70` (`lambda_function.py:103-107`). If any returned label is in `HOUSE_LABELS` (`House`, `Housing`, `Home`, `Cottage`, `Villa`, `Building`, `Architecture`, `Neighborhood`, `Suburb`, `Residential Building`, `Single Family Residence`), the image is copied to `Houses/<filename>`. The original is never moved or deleted.
 
 ### Address classification
 
@@ -90,7 +90,7 @@ sequenceDiagram
 
 1. If the line names a known non-US country (UK, France, Germany, Japan, Canada, and others in `NON_US_COUNTRIES_RE`), it is international.
 2. If it contains `USA`, `U.S.A.` or `United States`, it is US.
-3. If it contains a two-letter US state or DC abbreviation as a separate word, it is US.
+3. If it contains an uppercase two-letter US state or DC abbreviation, at the start of the line or after a space or comma, that is followed by a ZIP code or ends the line (`Springfield, IL 62704`, `Washington DC`), it is US. The match is case-sensitive, so words like "de" or "in" do not count.
 4. Otherwise it is international.
 
 Each address file overwrites `Addresses/us_addresses.txt` and `Addresses/international_addresses.txt`. A list with no entries is not written.
@@ -153,17 +153,16 @@ Images (as recorded from a run against the sample assets; Rekognition results ca
 
 `houseInterior.jpg` is an interior shot and still counts as a house, because broad labels like `Building` and `Architecture` are in the match set.
 
-Addresses from `assets/test.txt` (27 lines) with the current code: 12 US, 15 international.
+Addresses from `assets/test.txt` (27 lines) with the current code: 11 US, 16 international.
 
 ```
---- USA LIST (12 addresses) ---
+--- USA LIST (11 addresses) ---
   123 Main St, Los Angeles, CA 90001
   456 Oak Avenue, San Francisco, CA 94102
   1600 Amphitheatre Parkway, Mountain View, CA 94043
   350 5th Ave, New York, NY 10118
   1 Apple Park Way, Cupertino, CA 95014
   500 Terry A Francois Blvd, San Francisco, CA 94158
-  Plaza de Mayo, Buenos Aires C1064, Argentina        <- wrong
   CA 90210 Beverly Hills Missing Street Order
   742 Evergreen Terrace, Springfield, IL 62704
   1600 Pennsylvania Ave NW, Washington, DC 20500
@@ -171,7 +170,7 @@ Addresses from `assets/test.txt` (27 lines) with the current code: 12 US, 15 int
   1234 Random Blvd USA
 ```
 
-The Argentina address is misclassified because the state check runs on the upper-cased line, so the Spanish word "de" matches `DE` (Delaware), and Argentina is not in the non-US country list. The same applies to common words such as "in", "or", "me" and "la". "No ZIP Code Address, Some City, California" goes to international because full state names are not recognized.
+"Plaza de Mayo, Buenos Aires C1064, Argentina" goes to international: Argentina is not in the non-US country list, but "de" no longer matches `DE` (Delaware) because state codes must be uppercase and next to a ZIP or at the end of the line. "No ZIP Code Address, Some City, California" goes to international because full state names are not recognized.
 
 ## Design notes
 
@@ -203,16 +202,16 @@ The Argentina address is misclassified because the state check runs on the upper
 
 ### Production concerns
 
-- **Loop prevention:** the S3 trigger has no prefix filter, so the function's own writes to `Houses/` and `Addresses/` also invoke it. The handler skips any key under those prefixes before doing work (`lambda_function.py:68-70`), which prevents an infinite trigger loop.
+- **Loop prevention:** the S3 trigger has no prefix filter, so the function's own writes to `Houses/` and `Addresses/` also invoke it. The handler skips any key under those prefixes before doing work (`lambda_function.py:71-73`), which prevents an infinite trigger loop.
 - **Scaling:** S3-triggered Lambda scales out per upload without any extra configuration. Image and address processing share one function, so a spike in one competes with the other for concurrency.
 - **Error handling:** calls to S3 and Rekognition are wrapped so that a `ClientError` is logged with its AWS error code and then re-raised. Re-raising is deliberate: it marks the invocation as failed so that Lambda retries it and, if needed, routes it to the DLQ and counts it toward the alarm.
 
 ## Known limitations
 
-- **Address heuristic:** state matching is a word check on upper-cased text, which produces false positives (see above). Full state names and ZIP-only addresses are not recognized.
+- **Address heuristic:** a line ending in an uppercase two-letter code that happens to be a state (for example "Meet me in LA") still counts as US. Full state names, lowercase state codes and ZIP-only addresses are not recognized.
 - **Output overwrites:** each address file replaces the previous `Addresses/` outputs instead of appending, and an empty list leaves the previous file in place.
 - **Filename collisions:** images are copied to `Houses/<filename>`, so `a/house.jpg` and `b/house.jpg` overwrite each other.
-- **Image formats:** the handler treats `.gif`, `.bmp`, `.webp` and `.tiff` as images, but Rekognition `DetectLabels` only accepts JPEG and PNG, so those uploads fail and end up in the DLQ.
+- **Image formats:** only `.jpg`, `.jpeg` and `.png` are processed. Other image types (`.gif`, `.webp`, `.heic` and so on) are logged as unsupported and skipped, not converted.
 - **Batch failure:** if one record in an event fails, the remaining records in that event are not processed in that attempt.
 
 ## Future work
