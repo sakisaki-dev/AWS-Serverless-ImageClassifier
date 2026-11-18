@@ -2,192 +2,222 @@
 
 An event-driven pipeline on AWS. Files dropped into an S3 bucket trigger a Lambda function that:
 
-- **Images** (`.jpg`/`.png`): sends them to Amazon Rekognition and copies anything recognized as a house to `Houses/`.
-- **Address files** (`.txt`/`.csv`): splits addresses into US and international lists and writes them to `Addresses/`.
+- **Images** (`.jpg`/`.jpeg`/`.png`): sends them to Amazon Rekognition and copies anything recognized as a house to `Houses/`.
+- **Address files** (`.txt`/`.csv`, one address per line): splits addresses into US and international lists and writes them to `Addresses/`.
 
-Everything is provisioned with Terraform, logged as structured JSON to CloudWatch, alarmed by email, and backed by an SQS dead-letter queue for failures.
+Everything is provisioned with Terraform, logged as structured JSON to CloudWatch, alarmed by email, and backed by an SQS dead-letter queue for failed invocations.
 
-**Stack:** Python · AWS Lambda · S3 · Rekognition · SQS · CloudWatch · IAM · Terraform · pytest
+**Stack:** Python 3.12 · AWS Lambda · S3 · Rekognition · SQS · SNS · CloudWatch · IAM · Terraform · pytest
 
 ## Repository layout
 
 ```
-├── lambda_function.py   # the classifier
+├── lambda_function.py   # the classifier (single-file Lambda)
 ├── terraform/main.tf    # all infrastructure
-├── tests/test_lambda.py # end-to-end audit tests
-├── assets/              # sample images and addresses
-└── requirements.txt
+├── tests/test_lambda.py # post-deploy audit report against the live bucket
+├── assets/              # sample images and a sample address file (test.txt)
+└── requirements.txt     # local dependencies for running the tests
 ```
 
-## Overall Hierarchy 
+## How it works
 
 ```mermaid
 graph LR
-    A[S3 Upload] --> B{File Extension?}
-    
+    A[S3 Upload] --> P{Key under Houses/ or Addresses/?}
+    P -- Yes --> Z[Skip: loop prevention]
+    P -- No --> B{File Extension?}
+
     %% Image Path
-    B -- .jpg/.png --> C[AWS Rekognition]
-    C --> D{House Detected?}
-    D -- Yes --> E[Copy to /Houses]
-    D -- No --> F[End / No Action]
-    
+    B -- .jpg/.jpeg/.png --> C[Rekognition DetectLabels]
+    C --> D{House label >= 70%?}
+    D -- Yes --> E[Copy to Houses/]
+    D -- No --> F[Leave in place]
+
     %% Address Path
     B -- .txt/.csv --> G[Read File Content]
     G --> H{Is US Address?}
-    H -- Yes --> I[Add to us_addresses.txt]
-    H -- No --> J[Add to international_addresses.txt]
-    I --> K[Upload to /Addresses]
+    H -- Yes --> I[us_addresses.txt]
+    H -- No --> J[international_addresses.txt]
+    I --> K[Write to Addresses/]
     J --> K
-    
-    %% SRE Guardrail
-    E --> L[JSON Logging]
-    K --> L
-    L --> M{Errors?}
-    M -- Yes --> N[SQS DLQ]
+
+    %% Failure path
+    C -. ClientError .-> R[Log + re-raise]
+    G -. ClientError .-> R
+    R --> S[Lambda async retries]
+    S --> N[SQS DLQ]
 ```
 
-## AWS User Sequence Flow Chart
 ```mermaid
 sequenceDiagram
     participant U as User
     participant S3 as S3 Bucket
     participant L as Lambda Function
-    participant R as AWS Rekognition
+    participant R as Rekognition
     participant Q as SQS DLQ
 
-    U->>S3: Uploads Object
-    S3->>L: Triggers (s3:ObjectCreated)
-    
-    Note over L: Check for Loop Prevention
-    
-    alt Image File
-        L->>R: DetectLabels Request
-        R-->>L: Return Labels (House/Building)
-        L->>S3: Copy to /Houses (AES256)
-    else Address File
-        L->>S3: GetObject (Read Text)
-        S3-->>L: File Content
-        Note over L: Heuristic Parsing
-        L->>S3: PutObject (Split Lists)
+    U->>S3: Uploads object
+    S3->>L: Async invoke (s3:ObjectCreated:*)
+
+    Note over L: Skip keys under Houses/ or Addresses/
+
+    alt Image file
+        L->>R: DetectLabels (MaxLabels 20, MinConfidence 70)
+        R-->>L: Labels
+        L->>S3: CopyObject to Houses/ (SSE AES256)
+    else Address file
+        L->>S3: GetObject
+        S3-->>L: File content
+        Note over L: Heuristic US / international split
+        L->>S3: PutObject Addresses/*.txt (SSE AES256)
     end
 
-    Note right of L: Log JSON to CloudWatch
+    Note right of L: JSON log lines to CloudWatch
 
-    opt On Failure
-        L--x S3: Operation Failed
-        L->>Q: Send Message to DLQ
+    opt Invocation fails
+        Note over L: Error logged, exception re-raised
+        L->>Q: After Lambda's async retries, event goes to the DLQ
     end
 ```
-## Test Output
 
-```
-========================= IMAGE AUDIT =========================
-✅ [HOUSE]      nonConv.jpg          -> Labels: Villa (100.0%), Pool (100.0%), Swimming Pool (99.9%)
-✅ [HOUSE]      animated.jpg         -> Labels: Cottage (100.0%), House (100.0%), Housing (100.0%)
-❌ [NON-HOUSE]  dum.png              -> Reason: No house labels > 70% confidence
-❌ [NON-HOUSE]  modelMini.jpg        -> Reason: No house labels > 70% confidence
-✅ [HOUSE]      control.jpg          -> Labels: Neighborhood (99.2%), Garage (97.5%), Suburb (95.5%)
-✅ [HOUSE]      scaff.jpg            -> Labels: Wood (100.0%), Nature (98.0%), Outdoors (98.0%)
-✅ [HOUSE]      row.jpg              -> Labels: Neighborhood (100.0%), Housing (98.8%), City (98.4%)
-❌ [NON-HOUSE]  dice.jpg             -> Reason: No house labels > 70% confidence
-❌ [NON-HOUSE]  giraffe.jpg          -> Reason: No house labels > 70% confidence
-✅ [HOUSE]      houseInterior.jpg    -> Labels: Home Decor (99.3%), Couch (99.3%), Interior Design (98.9%)
-❌ [NON-HOUSE]  tameImpala.jpg       -> Reason: No house labels > 70% confidence
-PASSED
-test_lambda.py::TestFinalSystemAudit::test_address_classification_results 
-======================== ADDRESS AUDIT ========================
+### Image classification
 
---- USA LIST (13 addresses) ---
-  • 123 Main St, Los Angeles, CA 90001
-  • 456 Oak Avenue, San Francisco, CA 94102
-  • 1600 Amphitheatre Parkway, Mountain View, CA 94043
-  • 350 5th Ave, New York, NY 10118
-  • 1 Apple Park Way, Cupertino, CA 95014
-  • 500 Terry A Francois Blvd, San Francisco, CA 94158
-  • Plaza de Mayo, Buenos Aires C1064, Argentina ❌
-  • 123 Fake Street, Springfield ZZ 99999 ❌
-  • CA 90210 Beverly Hills Missing Street Order
-  • 742 Evergreen Terrace, Springfield, IL 62704
-  • 1600 Pennsylvania Ave NW, Washington, DC 20500
-  • 1600 Pennsylvania Ave NW Washington DC
-  • 1234 Random Blvd USA
+`_process_image` calls `DetectLabels` with `MaxLabels=20` and `MinConfidence=70` (`lambda_function.py:100-104`). If any returned label is in `HOUSE_LABELS` (`House`, `Housing`, `Home`, `Cottage`, `Villa`, `Building`, `Architecture`, `Neighborhood`, `Suburb`, `Residential Building`, `Single Family Residence`), the image is copied to `Houses/<filename>`. The original is never moved or deleted.
 
---- INTL LIST (14 addresses) ---
-  • 221B Baker Street, London NW1 6XE, UK
-  • 10 Downing Street, London SW1A 2AA, United Kingdom
-  • Champs-Élysées, 75008 Paris, France
-  • 29 Rue de Rivoli, 75004 Paris, France
-  • Potsdamer Platz 1, 10785 Berlin, Germany
-  • Shibuya Crossing, Tokyo 150-0002, Japan
-  • 1 Marina Bay Sands, Singapore 018956
-  • Sydney Opera House, Bennelong Point, Sydney NSW 2000, Australia
-  • Kremlin, Moscow 103073, Russia
-  • 1000 Rue Sherbrooke O, Montréal, QC H3A 1G5, Canada
-  • No ZIP Code Address, Some City, California
-  • Invalid Address Without Proper Format
-  • Eiffel Tower, Paris
-  • Colosseum, Rome, Italy
+### Address classification
 
-===============================================================
+`_is_us_address` is a heuristic, not a model:
 
+1. If the line names a known non-US country (UK, France, Germany, Japan, Canada, and others in `NON_US_COUNTRIES_RE`), it is international.
+2. If it contains `USA`, `U.S.A.` or `United States`, it is US.
+3. If it contains a two-letter US state or DC abbreviation as a separate word, it is US.
+4. Otherwise it is international.
+
+Each address file overwrites `Addresses/us_addresses.txt` and `Addresses/international_addresses.txt`. A list with no entries is not written.
+
+## Setup and deploy
+
+Prerequisites: Terraform 1.5 or later, AWS CLI v2 with credentials configured (`aws configure`), and Python 3.12 for the tests.
+
+```bash
+cd terraform
+terraform init
+terraform apply \
+  -var="alert_email=you@example.com" \
+  -var="bucket_name=<a-globally-unique-bucket-name>"
 ```
 
-We can see the two incorrectly defined addresses being classified as a US address this is to highlight the limitations of the model in that all countries have to be completely defined and the zip-code system is too basic to catch that `123 Fake Street, Springfield ZZ 99999` ZZ is not a real state thus the fact that it has a Zip Code shouldn't matter. *Further production grade implementation would include a connection to USPS database of address using Smarty or Lob API. (see "Better address checking" below)*
+Variables (`terraform/main.tf:18-33`):
 
-# Design notes
+| Variable      | Default                      | Notes                                   |
+|---------------|------------------------------|-----------------------------------------|
+| `aws_region`  | `us-west-2`                  |                                         |
+| `bucket_name` | `image-classifier-processor` | S3 names are global; override this      |
+| `alert_email` | (required)                   | Receives CloudWatch alarm notifications |
 
-  
+After `apply`, confirm the SNS subscription email AWS sends to `alert_email`, otherwise alarms are not delivered. Terraform outputs the bucket name, Lambda function name and DLQ URL.
 
-## 1. Monitoring & Observability
+### Try it
 
-I implemented a multi-layered monitoring strategy to ensure the system is "self-describing" in production:
-
-*  **Structured JSON Logging:** 
-Since the regular logs are often verbose, a standard practice for me was to always put in place some formatting and filtering to be able to better define logs. The use of JSON to format logs also allows me to make queries such as find the images where confidence was over a certain threshold etc. 
-
-*  **Proactive Alerting:**
-A CloudWatch alarm triggers an Email alert when more than 2 errors show up in a 60 minute span. Allowing you to run the program with a batch of images and let it run with perfect reliability and notification if something doesn't work.
-
-
-*  **Dead Letter Queue (DLQ):** 
-A method for reliability allows us to preserve certain issues so that we can go back to each one and be able to debug and recreate the issue so that it doesn't happen again
-
-  
-
-## 2. Security - Least Privilege 
-
-
-*  **IAM Scoping:** The Lambda execution role is restricted to only the necessary actions (`s3:GetObject`, `s3:PutObject`, `rekognition:DetectLabels`). It cannot delete objects or access other buckets.
-
-*  **Public Access Block:**  The s3 bucket is specifically barred from accessing anything public with 
-```
-resource "aws_s3_bucket_public_access_block" "main" {
-bucket = aws_s3_bucket.main.id
-block_public_acls =  true
-block_public_policy =  true
-ignore_public_acls =  true
-restrict_public_buckets =  true
-}
+```bash
+aws s3 cp ../assets/ s3://<bucket_name>/ --recursive
+aws s3 ls s3://<bucket_name>/Houses/
+aws s3 cp s3://<bucket_name>/Addresses/us_addresses.txt -
 ```
 
-*  **Encryption at Rest:** All processed files automatically use AES256 server-side encryption (faster than RSA and more usable for the small case data we expect to handle) during `s3:GetObject`, `s3:PutObject`.
+Logs are in the `/aws/lambda/image-classifier-processor` log group.
 
-*  **Environment Safety:** No secrets even touch the code, every part of the infrastructure config is handled through terraform variables, and we use AWS CLI to handle AWS credential login using the browser (this proved very unreliable so I had to generate a key instead of using browser login ie. `aws configure` instead of `aws login`.
-  
+### Tear down
 
-## 3. Production Concerns
+Versioning is enabled on the bucket, so empty it (including old versions) before `terraform destroy`.
 
-*  **Idempotency & Loop Prevention:**  An issue I ran into when working with event-driven properties is the point of infinitely looping. Say if we write to say the `Houses/` file, due to the event-driven nature of the system Rekognition and lambda can look at this as a reason to execute the program again, resulting in infinite loops and major compute loss. Thus we always check the folder we're in to make sure that we don't run anything in that specific folder to then trigger that same folder (`Houses/` or `Addresses/`)
+## Tests
 
-*  **Concurrency & Scaling:** By using an event-driven architecture, the system scales horizontally automatically. If 1,000 images are uploaded at once, AWS manages the Lambda scaling to match demand. For future reference we could run two independent instances, one for houses and one for addresses thus allowing a spike in one category not to affect another
+`tests/test_lambda.py` is a post-deploy audit, not a unit-test suite. It reads the live bucket and prints which sample images landed in `Houses/` and how `test.txt` was split. It makes no assertions, so it passes as long as it runs.
 
-*  **Error Handling:** The code uses `try-except` blocks around external service calls (S3/Rekognition) to catch `ClientError` exceptions, ensuring that API issues are logged without crashing the process.
+```bash
+pip install -r requirements.txt
+# upload assets/ first (see "Try it"), then:
+pytest tests/ -s
+```
 
+The bucket name and region are hard-coded in the test (`BUCKET_NAME = "image-classifier-processor"`, `REGION = "us-west-2"`). Edit them if you deployed with different values.
 
-## 4. To Implement / For Production TODO
+### Sample results
 
+Images (as recorded from a run against the sample assets; Rekognition results can vary):
 
-*  **CI/CD:**  Making a Canary deployment to test newer versions with portions of traffic, as well as implementing automated rollback in case the pipeline gets upgraded or becomes *much* more complex in the future. 
-*  **Better Address Checking (Real World):** Since right now the only way to validate if an address is in the USA is to use `is_us_address` which is not an AI model but a heuristic / context based classifier the best way to be completely accurate would be to connect with the USPS database and reference against real-world addresses. *The only reason the implementation is rudimentary is because I did not know the quality of data I would be getting.*
-* **Malware Injection (HIGH PRIORITY):**  Not yet implemented: one of the biggest issues with systems like this is malware injection, in which I would scan each file to prevent malware from entering the s3 buckets. However the IAM Least Privileges and no access to the internet can mitigate this blast radius.
-* **SQS Buffer and Concurrency Control:** Something I did during my time working as the Lead Infra Engineer was to use an SQS buffer between `s3 -> Lambda ` to prevent API Throttling (`s3 -> SQS -> Lambda`). Further would also like to implement concurrency control to keep under rekognition's TPS Limits and prevent it from being overwhelmed
+| Copied to `Houses/` | Not copied |
+|---|---|
+| nonConv.jpg, animated.jpg, control.jpg, scaff.jpg, row.jpg, houseInterior.jpg | dum.png, modelMini.jpg, dice.jpg, giraffe.jpg, tameImpala.jpg |
+
+`houseInterior.jpg` is an interior shot and still counts as a house, because broad labels like `Building` and `Architecture` are in the match set.
+
+Addresses from `assets/test.txt` (27 lines) with the current code: 12 US, 15 international.
+
+```
+--- USA LIST (12 addresses) ---
+  123 Main St, Los Angeles, CA 90001
+  456 Oak Avenue, San Francisco, CA 94102
+  1600 Amphitheatre Parkway, Mountain View, CA 94043
+  350 5th Ave, New York, NY 10118
+  1 Apple Park Way, Cupertino, CA 95014
+  500 Terry A Francois Blvd, San Francisco, CA 94158
+  Plaza de Mayo, Buenos Aires C1064, Argentina        <- wrong
+  CA 90210 Beverly Hills Missing Street Order
+  742 Evergreen Terrace, Springfield, IL 62704
+  1600 Pennsylvania Ave NW, Washington, DC 20500
+  1600 Pennsylvania Ave NW Washington DC
+  1234 Random Blvd USA
+```
+
+The Argentina address is misclassified because the state check runs on the upper-cased line, so the Spanish word "de" matches `DE` (Delaware), and Argentina is not in the non-US country list. The same applies to common words such as "in", "or", "me" and "la". "No ZIP Code Address, Some City, California" goes to international because full state names are not recognized.
+
+## Design notes
+
+### Monitoring and observability
+
+- **Structured JSON logging:** every log line is a JSON object (`log()` in `lambda_function.py:13-16`) with fields such as `key`, `matched_labels`, `us` and `international`, so CloudWatch Logs Insights can filter and aggregate on them.
+- **Alerting:** a CloudWatch alarm on the Lambda `Errors` metric fires when the sum exceeds 2 in a single 60-second period, and notifies the SNS email subscription (`terraform/main.tf:219-236`).
+- **Dead-letter queue:** S3 invokes Lambda asynchronously. When an invocation fails, Lambda retries it, and if it still fails the event is sent to the SQS DLQ (`image-classifier-dlq`, 14-day retention, SSE with the AWS-managed SQS key). Failed events can then be inspected and replayed.
+- **Log retention:** 30 days.
+
+### Security
+
+- **IAM scoping:** the Lambda role can only write its own log stream, `s3:GetObject`/`s3:PutObject` on objects in this one bucket, call `rekognition:DetectLabels`, and `sqs:SendMessage` to the DLQ. It has no delete permission and no access to other buckets. (`rekognition:DetectLabels` is granted on `*` because the action does not support resource-level scoping.)
+- **Public access block:** all four S3 public-access settings are enabled:
+
+  ```hcl
+  resource "aws_s3_bucket_public_access_block" "main" {
+    bucket                  = aws_s3_bucket.main.id
+    block_public_acls       = true
+    block_public_policy     = true
+    ignore_public_acls      = true
+    restrict_public_buckets = true
+  }
+  ```
+
+- **Encryption at rest:** the bucket has default SSE-S3 (AES256) encryption with bucket keys, and the Lambda also sets `ServerSideEncryption="AES256"` explicitly on every object it writes.
+- **Versioning:** enabled on the bucket, so overwritten output files can be recovered.
+- **No secrets in code:** configuration comes from Terraform variables, and AWS credentials come from the local AWS CLI profile.
+
+### Production concerns
+
+- **Loop prevention:** the S3 trigger has no prefix filter, so the function's own writes to `Houses/` and `Addresses/` also invoke it. The handler skips any key under those prefixes before doing work (`lambda_function.py:68-70`), which prevents an infinite trigger loop.
+- **Scaling:** S3-triggered Lambda scales out per upload without any extra configuration. Image and address processing share one function, so a spike in one competes with the other for concurrency.
+- **Error handling:** calls to S3 and Rekognition are wrapped so that a `ClientError` is logged with its AWS error code and then re-raised. Re-raising is deliberate: it marks the invocation as failed so that Lambda retries it and, if needed, routes it to the DLQ and counts it toward the alarm.
+
+## Known limitations
+
+- **Address heuristic:** state matching is a word check on upper-cased text, which produces false positives (see above). Full state names and ZIP-only addresses are not recognized.
+- **Output overwrites:** each address file replaces the previous `Addresses/` outputs instead of appending, and an empty list leaves the previous file in place.
+- **Filename collisions:** images are copied to `Houses/<filename>`, so `a/house.jpg` and `b/house.jpg` overwrite each other.
+- **Image formats:** the handler treats `.gif`, `.bmp`, `.webp` and `.tiff` as images, but Rekognition `DetectLabels` only accepts JPEG and PNG, so those uploads fail and end up in the DLQ.
+- **Batch failure:** if one record in an event fails, the remaining records in that event are not processed in that attempt.
+
+## Future work
+
+- **CI/CD:** automated `terraform plan` on pull requests, plus canary deployments with automatic rollback.
+- **Address validation:** verify addresses against USPS data (for example through Smarty or Lob) instead of the heuristic.
+- **Malware scanning:** scan uploads before processing. The function is not in a VPC, so least-privilege IAM is the main containment today, not network isolation.
+- **SQS buffer and concurrency control:** put SQS between S3 and Lambda (`S3 -> SQS -> Lambda`) and cap Lambda concurrency to stay under Rekognition's TPS limits.
