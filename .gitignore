@@ -1,5 +1,10 @@
 .terraform/
 *.tfstate
 *.tfstate.backup
+terraform/lambda.zip
+*.zip
 __pycache__/
-.env.DS_Store
+*.pyc
+.pytest_cache/
+.env
+.DS_Store
