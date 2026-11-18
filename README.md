@@ -1,21 +1,23 @@
-# Design Doc
+# AWS Serverless Image Classifier
 
+An event-driven pipeline on AWS. Files dropped into an S3 bucket trigger a Lambda function that:
 
-What follows is the design doc that shows the overall structure and hierarchy of my program, why I chose the components, what challenges I overcame and overall logistics of the program as a whole
+- **Images** (`.jpg`/`.png`): sends them to Amazon Rekognition and copies anything recognized as a house to `Houses/`.
+- **Address files** (`.txt`/`.csv`): splits addresses into US and international lists and writes them to `Addresses/`.
 
-**Disclaimer** This is not AI - Generated, although **I did use AI to help me complete this assessment** all files, features and flaws are of my own design and any use of AI can be explained in its entirety and why I chose to use it.
+Everything is provisioned with Terraform, logged as structured JSON to CloudWatch, alarmed by email, and backed by an SQS dead-letter queue for failures.
 
+**Stack:** Python · AWS Lambda · S3 · Rekognition · SQS · CloudWatch · IAM · Terraform · pytest
 
-# File Structure
+## Repository layout
 
-homevision-submission.zip
-|──  lambda_function.py       ← the classifier
-|── DESIGN_DOC.md            ← You are here :)
-|── terraform/
-│   └── main.tf              ← where the infra lives
-└── tests/
-      └── test_lambda.py       ← tests I made to check quality of the program
-|── requirements.txt.     ← All the packages I used (good practice)
+```
+├── lambda_function.py   # the classifier
+├── terraform/main.tf    # all infrastructure
+├── tests/test_lambda.py # end-to-end audit tests
+├── assets/              # sample images and addresses
+└── requirements.txt
+```
 
 ## Overall Hierarchy 
 
@@ -130,9 +132,9 @@ test_lambda.py::TestFinalSystemAudit::test_address_classification_results
 
 ```
 
-We can see the two incorrectly defined addresses being classified as a US address this is to highlight the limitations of the model in that all countries have to be completely defined and the zip-code system is too basic to catch that `123 Fake Street, Springfield ZZ 99999` ZZ is not a real state thus the fact that it has a Zip Code shouldn't matter. *Further production grade implementation would include a connection to USPS database of address using Smarty or Lob API. (See Criteria 4.1)*
+We can see the two incorrectly defined addresses being classified as a US address this is to highlight the limitations of the model in that all countries have to be completely defined and the zip-code system is too basic to catch that `123 Fake Street, Springfield ZZ 99999` ZZ is not a real state thus the fact that it has a Zip Code shouldn't matter. *Further production grade implementation would include a connection to USPS database of address using Smarty or Lob API. (see "Better address checking" below)*
 
-# Criteria
+# Design notes
 
   
 
@@ -187,5 +189,5 @@ restrict_public_buckets =  true
 
 *  **CI/CD:**  Making a Canary deployment to test newer versions with portions of traffic, as well as implementing automated rollback in case the pipeline gets upgraded or becomes *much* more complex in the future. 
 *  **Better Address Checking (Real World):** Since right now the only way to validate if an address is in the USA is to use `is_us_address` which is not an AI model but a heuristic / context based classifier the best way to be completely accurate would be to connect with the USPS database and reference against real-world addresses. *The only reason the implementation is rudimentary is because I did not know the quality of data I would be getting.*
-* **Malware Injection (HIGH PRIORITY):**  Although I didn't get to it in this project, one of the biggest issues with systems like this is malware injection, in which I would scan each file to prevent malware from entering the s3 buckets. However the IAM Least Privileges and no access to the internet can mitigate this blast radius.
+* **Malware Injection (HIGH PRIORITY):**  Not yet implemented: one of the biggest issues with systems like this is malware injection, in which I would scan each file to prevent malware from entering the s3 buckets. However the IAM Least Privileges and no access to the internet can mitigate this blast radius.
 * **SQS Buffer and Concurrency Control:** Something I did during my time working as the Lead Infra Engineer was to use an SQS buffer between `s3 -> Lambda ` to prevent API Throttling (`s3 -> SQS -> Lambda`). Further would also like to implement concurrency control to keep under rekognition's TPS Limits and prevent it from being overwhelmed

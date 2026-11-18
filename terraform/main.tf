@@ -24,7 +24,7 @@ variable "aws_region" {
 variable "bucket_name" {
   description = "Name of the S3 bucket (must be globally unique)"
   type        = string
-  default     = "homevision-file-processor"
+  default     = "image-classifier-processor"
 }
 
 variable "alert_email" {
@@ -38,7 +38,7 @@ resource "aws_s3_bucket" "main" {
   bucket = var.bucket_name
 
   tags = {
-    Project     = "homevision-takehome"
+    Project     = "serverless-image-classifier"
     Environment = "demo"
   }
 }
@@ -74,12 +74,12 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "main" {
 # ── SQS Dead Letter Queue ─────────────────────────────────────────────────────
 
 resource "aws_sqs_queue" "dlq" {
-  name                      = "homevision-processor-dlq"
+  name                      = "image-classifier-dlq"
   message_retention_seconds = 1209600  # 14 days
   kms_master_key_id         = "alias/aws/sqs"
 
   tags = {
-    Project = "homevision-takehome"
+    Project = "serverless-image-classifier"
   }
 }
 
@@ -87,7 +87,7 @@ resource "aws_sqs_queue" "dlq" {
 # Least privelege role
 
 resource "aws_iam_role" "lambda" {
-  name = "homevision-processor-lambda-role"
+  name = "image-classifier-lambda-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -100,7 +100,7 @@ resource "aws_iam_role" "lambda" {
 }
 
 resource "aws_iam_role_policy" "lambda" {
-  name = "homevision-processor-lambda-policy"
+  name = "image-classifier-lambda-policy"
   role = aws_iam_role.lambda.id
 
   policy = jsonencode({
@@ -141,7 +141,7 @@ resource "aws_iam_role_policy" "lambda" {
 # ── CloudWatch Log Group ───────────────────────────────────────────────────────
 
 resource "aws_cloudwatch_log_group" "lambda" {
-  name              = "/aws/lambda/homevision-file-processor"
+  name              = "/aws/lambda/image-classifier-processor"
   retention_in_days = 30   
 }
 
@@ -154,7 +154,7 @@ data "archive_file" "lambda_zip" {
 }
 
 resource "aws_lambda_function" "processor" {
-  function_name    = "homevision-file-processor"
+  function_name    = "image-classifier-processor"
   role             = aws_iam_role.lambda.arn
   handler          = "lambda_function.lambda_handler"
   runtime          = "python3.12"
@@ -175,7 +175,7 @@ resource "aws_lambda_function" "processor" {
   }
 
   tags = {
-    Project = "homevision-takehome"
+    Project = "serverless-image-classifier"
   }
 
   depends_on = [aws_cloudwatch_log_group.lambda]
@@ -207,7 +207,7 @@ resource "aws_s3_bucket_notification" "trigger" {
 
 
 resource "aws_sns_topic" "alerts" {
-  name = "homevision-processor-alerts"
+  name = "image-classifier-alerts"
 }
 
 resource "aws_sns_topic_subscription" "email" {
@@ -217,7 +217,7 @@ resource "aws_sns_topic_subscription" "email" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "lambda_errors" {
-  alarm_name          = "homevision-processor-errors"
+  alarm_name          = "image-classifier-errors"
   alarm_description   = "Lambda error rate exceeded threshold"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1

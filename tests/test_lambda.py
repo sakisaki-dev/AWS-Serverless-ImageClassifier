@@ -15,7 +15,7 @@ Test file that draws from my assets folder and prints it out nice and easy for m
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from lambda_function import _extension
 
-BUCKET_NAME = "homevision-file-processor"
+BUCKET_NAME = "image-classifier-processor"
 REGION = "us-west-2"
 
 class TestFinalSystemAudit:
